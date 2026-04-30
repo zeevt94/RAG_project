@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables (חשוב מאוד!)
+.env
+
+# Git
+.git/
+.gitignore
+
+# IDEs
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Tests / cache
+.pytest_cache/
+.cache/
+
+# Large or unnecessary files
+*.zip
+*.tar
+*.gz
+
+# Node (אם יש במקרה)
+node_modules/
+
+# Docker (מונע nested build issues)
+Dockerfile*
+docker-compose*

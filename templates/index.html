@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AWS Bedrock KB RAG</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+<main class="app-shell">
+  <section class="left-panel card">
+    <div class="bot-wrap">
+      <div class="bot">
+        <div class="antenna"></div>
+        <div class="bot-head">
+          <span></span><span></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="messages" class="messages">
+      <div class="bubble bot-msg">Hi! Upload documents, wait for ingestion to complete, then ask me questions.</div>
+    </div>
+
+    <form id="chat-form" class="chat-form">
+      <input id="chat-input" type="text" placeholder="Ask something about your documents..." required>
+      <div class="chat-actions">
+        <label>Top-K
+          <select id="topk">
+            <option>3</option>
+            <option selected>5</option>
+            <option>10</option>
+          </select>
+        </label>
+        <button type="submit" id="ask-btn">Ask</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="right-panel">
+    <div class="card">
+      <h2>Documents</h2>
+
+      <div id="drop-zone" class="drop-zone">
+        <div class="upload-icon">☁</div>
+        <p>Drag & Drop files here</p>
+      </div>
+
+      <form id="upload-form">
+        <input type="file" id="files" name="files" multiple accept=".txt,.pdf,.md,.docx">
+        <button type="submit">Upload & Sync KB</button>
+      </form>
+
+      <p id="upload-status" class="status">Ready.</p>
+    </div>
+
+    <div class="card">
+      <h2>Files in S3</h2>
+      <button id="refresh-files" type="button" class="small-btn">Refresh Files</button>
+      <ul id="file-list" class="file-list"></ul>
+    </div>
+
+    <div class="card">
+      <h2>Ingestion Job</h2>
+      <div class="job-row">
+        <input id="job-id" type="text" placeholder="Ingestion job ID">
+        <button id="check-job" type="button">Check Status</button>
+      </div>
+
+      <div class="progress-box">
+        <div id="progress-bar"></div>
+      </div>
+
+      <p id="job-status" class="status">No active ingestion job.</p>
+    </div>
+
+    <div class="card">
+      <h2>Sources</h2>
+      <ol id="sources-list" class="sources-list"></ol>
+    </div>
+  </section>
+</main>
+
+<script>
+const messages = document.getElementById("messages");
+const uploadForm = document.getElementById("upload-form");
+const filesInput = document.getElementById("files");
+const uploadStatus = document.getElementById("upload-status");
+const jobIdInput = document.getElementById("job-id");
+const jobStatus = document.getElementById("job-status");
+const progressBar = document.getElementById("progress-bar");
+const sourcesList = document.getElementById("sources-list");
+const askBtn = document.getElementById("ask-btn");
+
+let pollingTimer = null;
+
+function addMessage(text, type) {
+  const div = document.createElement("div");
+  div.className = `bubble ${type === "user" ? "user-msg" : "bot-msg"}`;
+  div.textContent = text;
+  messages.appendChild(div);
+  messages.scrollTop = messages.scrollHeight;
+  return div;
+}
+
+function setProgress(status) {
+  progressBar.className = "";
+
+  if (status === "STARTING" || status === "IN_PROGRESS") {
+    progressBar.style.width = "60%";
+    progressBar.classList.add("running");
+  } else if (status === "COMPLETE" || status === "COMPLETED") {
+    progressBar.style.width = "100%";
+    progressBar.classList.add("success");
+  } else if (status === "FAILED") {
+    progressBar.style.width = "100%";
+    progressBar.classList.add("failed");
+  } else {
+    progressBar.style.width = "0%";
+  }
+}
+
+function displayOriginalName(s3Key) {
+  const filename = s3Key.split("/").pop();
+
+  // Removes UUID prefix like: 74d31ec85ae448afb10a3731096f431c_FC_Barcelona.pdf
+  return filename.replace(/^[a-f0-9]{32}_/, "");
+}
+
+async function loadFiles() {
+  const list = document.getElementById("file-list");
+  list.innerHTML = "";
+
+  const res = await fetch("/files");
+  const data = await res.json();
+
+  (data.files || []).forEach(file => {
+    const li = document.createElement("li");
+      li.innerHTML = `
+      <div class="file-row">
+        <span class="file-name">▣ ${file.name || displayOriginalName(file.key)}</span>
+        <button class="delete-btn" onclick="deleteFile('${file.key}')">✖</button>
+      </div>
+    `;
+    list.appendChild(li);
+  });
+}
+
+async function checkJobStatus(auto = false) {
+  const jobId = jobIdInput.value.trim();
+
+  if (!jobId) {
+    jobStatus.textContent = "No ingestion job ID.";
+    return;
+  }
+
+  const res = await fetch(`/ingestion/${jobId}`);
+  const data = await res.json();
+
+  const status = data.status || data.ingestionJobStatus || "UNKNOWN";
+  jobStatus.textContent = `Status: ${status}`;
+  setProgress(status);
+
+  if (status === "COMPLETE" || status === "COMPLETED") {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+    uploadStatus.textContent = "Knowledge Base sync completed. You can ask questions now.";
+  }
+
+  if (status === "FAILED") {
+    clearInterval(pollingTimer);
+    pollingTimer = null;
+    uploadStatus.textContent = "Knowledge Base ingestion failed.";
+  }
+
+  if (!auto) {
+    console.log(data);
+  }
+}
+
+function startAutoPolling(jobId) {
+  jobIdInput.value = jobId;
+  setProgress("IN_PROGRESS");
+  jobStatus.textContent = "Status: IN_PROGRESS";
+  uploadStatus.textContent = "Upload completed. Knowledge Base sync is running...";
+
+  if (pollingTimer) clearInterval(pollingTimer);
+
+  pollingTimer = setInterval(() => {
+    checkJobStatus(true);
+  }, 5000);
+}
+
+uploadForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const formData = new FormData();
+  for (const file of filesInput.files) {
+    formData.append("files", file);
+  }
+
+  uploadStatus.textContent = "Uploading to S3...";
+  setProgress("STARTING");
+
+  const res = await fetch("/upload", {
+    method: "POST",
+    body: formData
+  });
+
+  const data = await res.json();
+
+  if (data.error) {
+    uploadStatus.textContent = "Error: " + data.error;
+    setProgress("FAILED");
+    return;
+  }
+
+  await loadFiles();
+
+  const jobId = data.ingestion_job?.ingestionJobId;
+  if (jobId) {
+    startAutoPolling(jobId);
+  } else {
+    uploadStatus.textContent = "Uploaded, but no ingestion job ID returned.";
+  }
+});
+
+document.getElementById("chat-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  const question = document.getElementById("chat-input").value.trim();
+  const top_k = Number(document.getElementById("topk").value);
+
+  if (!question) return;
+
+  addMessage(question, "user");
+  document.getElementById("chat-input").value = "";
+
+  const botBubble = addMessage("Thinking...", "bot");
+  askBtn.disabled = true;
+  sourcesList.innerHTML = "";
+
+  try {
+    const res = await fetch("/ask", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ question, top_k })
+    });
+
+    const data = await res.json();
+    botBubble.textContent = data.answer || "No answer returned.";
+
+    (data.citations || []).forEach(c => {
+      (c.references || []).forEach(r => {
+        const li = document.createElement("li");
+        li.textContent = r.s3_uri ? displayOriginalName(r.s3_uri) : "Source";
+        sourcesList.appendChild(li);
+      });
+    });
+
+  } catch (err) {
+    botBubble.textContent = "Server error. Check Flask logs.";
+  } finally {
+    askBtn.disabled = false;
+  }
+});
+
+document.getElementById("refresh-files").addEventListener("click", loadFiles);
+document.getElementById("check-job").addEventListener("click", () => checkJobStatus(false));
+
+const dropZone = document.getElementById("drop-zone");
+
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("active");
+});
+
+dropZone.addEventListener("dragleave", () => {
+  dropZone.classList.remove("active");
+});
+
+dropZone.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("active");
+
+  const formData = new FormData();
+  for (const file of e.dataTransfer.files) {
+    formData.append("files", file);
+  }
+
+  uploadStatus.textContent = "Uploading dropped files...";
+  setProgress("STARTING");
+
+  const res = await fetch("/upload", {
+    method: "POST",
+    body: formData
+  });
+
+  const data = await res.json();
+  await loadFiles();
+
+  const jobId = data.ingestion_job?.ingestionJobId;
+  if (jobId) startAutoPolling(jobId);
+});
+
+loadFiles();
+async function deleteFile(key) {
+  if (!confirm("Delete this file?")) return;
+
+  const res = await fetch("/delete", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ key })
+  });
+
+  const data = await res.json();
+
+  if (data.error) {
+    alert("Error: " + data.error);
+    return;
+  }
+
+  loadFiles();
+}
+</script>
+</body>
+</html>
